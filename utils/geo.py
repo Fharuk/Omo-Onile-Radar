@@ -143,15 +143,17 @@ class CoordinateManager:
         self, 
         easting: float, 
         northing: float, 
-        zone: int
+        zone: int,
+        units: str = 'meters'
     ) -> Tuple[float, float]:
         """
         Convert a single coordinate pair from Minna Datum to WGS84.
         
         Args:
-            easting: Easting coordinate in meters (X coordinate in Minna Datum)
-            northing: Northing coordinate in meters (Y coordinate in Minna Datum)
+            easting: Easting coordinate (X coordinate in Minna Datum)
+            northing: Northing coordinate (Y coordinate in Minna Datum)
             zone: Zone number (26331 for Zone 31N/West, 26332 for Zone 32N/East)
+            units: Unit of measurement ('meters' or 'feet'). Default is 'meters'.
         
         Returns:
             Tuple of (longitude, latitude) in WGS84 (EPSG:4326)
@@ -164,7 +166,15 @@ class CoordinateManager:
             >>> manager = CoordinateManager()
             >>> lon, lat = manager.convert_minna_to_wgs84(500000, 700000, 26331)
             >>> print(f"Longitude: {lon:.6f}, Latitude: {lat:.6f}")
+            >>> # With feet
+            >>> lon, lat = manager.convert_minna_to_wgs84(1640420, 2296587, 26331, units='feet')
         """
+        # Convert feet to meters if necessary
+        if units.lower() == 'feet':
+            easting = easting * 0.3048
+            northing = northing * 0.3048
+            logger.debug(f"Converted from feet to meters: ({easting:.2f}, {northing:.2f})")
+        
         # Validate coordinates first
         is_valid, error_msg = self.validate_coordinates(easting, northing)
         if not is_valid:
@@ -209,7 +219,8 @@ class CoordinateManager:
     def batch_convert(
         self, 
         coordinates: List[Dict[str, float]], 
-        zone: int
+        zone: int,
+        units: str = 'meters'
     ) -> List[Dict[str, float]]:
         """
         Convert multiple coordinate pairs from Minna Datum to WGS84.
@@ -220,6 +231,7 @@ class CoordinateManager:
         Args:
             coordinates: List of dictionaries with 'easting' and 'northing' keys
             zone: Zone number (26331 for Zone 31N/West, 26332 for Zone 32N/East)
+            units: Unit of measurement ('meters' or 'feet'). Default is 'meters'.
         
         Returns:
             List of dictionaries with 'longitude', 'latitude', 'easting', and 'northing' keys
@@ -256,7 +268,7 @@ class CoordinateManager:
                 northing = coord['northing']
                 
                 # Convert to WGS84
-                longitude, latitude = self.convert_minna_to_wgs84(easting, northing, zone)
+                longitude, latitude = self.convert_minna_to_wgs84(easting, northing, zone, units)
                 
                 # Store both original and converted coordinates
                 converted_coords.append({

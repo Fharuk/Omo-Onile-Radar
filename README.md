@@ -6,10 +6,16 @@ A production-ready Streamlit application for real estate due diligence in the Ni
 
 - 🔍 **AI-Powered OCR**: Extracts survey data using OpenAI's GPT-4 Vision model
 - 📐 **Coordinate Transformation**: Converts Minna Datum (EPSG:26331/26332) to WGS84 (EPSG:4326)
-- 🗺️ **Interactive Maps**: Visualizes property boundaries using Folium
+- 🗺️ **Interactive Maps**: Visualizes property boundaries using Folium with satellite imagery
+- 🛰️ **Satellite View**: Toggle between Street and Satellite (Esri World Imagery) map layers
+- 📏 **Unit Conversion**: Support for both Meters and Feet coordinate units
+- ✏️ **Editable Coordinates**: Review and correct extracted coordinates before mapping
+- 📧 **Email Notifications**: Admin receives instant email alerts when leads are submitted
+- 🚨 **Risk Detection**: Intelligent detection of government acquisition zones and restricted areas
 - ⚠️ **Red Flag Detection**: Identifies concerning terms in survey documents
 - 📊 **Data Export**: Download extracted coordinates as CSV
 - 🎨 **User-Friendly Interface**: Clean, intuitive Streamlit interface
+- 🧪 **Demo Mode**: Test the application without an API key
 
 ## Nigerian Minna Datum Zones
 
@@ -54,6 +60,33 @@ The application supports both Nigerian survey zones:
    # Edit .env and add your OpenAI API key
    ```
 
+5. **Configure email notifications (Optional)**
+   
+   To receive email notifications when leads are submitted:
+   
+   ```bash
+   # Create Streamlit secrets directory
+   mkdir -p .streamlit
+   
+   # Copy the example secrets file
+   cp .secrets.toml.example .streamlit/secrets.toml
+   
+   # Edit .streamlit/secrets.toml and add your email credentials
+   ```
+   
+   **For Gmail users:**
+   - You MUST use an App Password (not your regular Gmail password)
+   - Generate one at: https://myaccount.google.com/apppasswords
+   - Select "Mail" as the app type
+   - Copy the generated password to `secrets.toml`
+   
+   Example `.streamlit/secrets.toml`:
+   ```toml
+   [email]
+   admin_email = "your-email@gmail.com"
+   admin_password = "your-16-char-app-password"
+   ```
+
 ## Usage
 
 ### Running the Application
@@ -69,29 +102,38 @@ The application supports both Nigerian survey zones:
 
 ### Using the Tool
 
-1. **Enter your OpenAI API key** in the sidebar
+1. **Enter your OpenAI API key** in the sidebar (or enable Demo Mode)
 2. **Select your region** (Lagos West or Lagos East)
-3. **Upload a survey plan** image (PNG, JPG, or JPEG)
-4. **Click "Process Survey Plan"** to extract data
-5. **View results**:
+3. **Select coordinate units** (Meters or Feet)
+4. **Upload a survey plan** image (PNG, JPG, or JPEG)
+5. **Click "Process Survey Plan"** to extract data
+6. **Review and edit coordinates** in the editable table if needed
+7. **View results**:
    - Survey metadata (number, surveyor, location)
+   - Risk assessment (government zone intersections)
    - Red flags (if any)
-   - Interactive map with property boundaries
+   - Interactive map with property boundaries and satellite view
+   - Toggle between Street and Satellite map layers
    - Coordinate table with both Minna and WGS84 values
-6. **Download coordinates** as CSV for further analysis
+8. **Download coordinates** as CSV for further analysis
+9. **Request professional verification** via the lead form (admin receives email notification)
 
 ## Project Structure
 
 ```
 omo-onile-radar/
-├── app.py                 # Main Streamlit application
-├── requirements.txt       # Python dependencies
-├── .env.example          # Environment configuration template
-├── README.md             # This file
+├── app.py                      # Main Streamlit application
+├── requirements.txt            # Python dependencies
+├── .env.example               # Environment configuration template
+├── .secrets.toml.example      # Email notification config example
+├── README.md                  # This file
 └── utils/
-    ├── __init__.py       # Package initialization
-    ├── geo.py            # Coordinate transformation module
-    └── ocr.py            # Survey data extraction module
+    ├── __init__.py            # Package initialization
+    ├── geo.py                 # Coordinate transformation module (with unit conversion)
+    ├── ocr.py                 # Survey data extraction module
+    ├── risk_engine.py         # Risk detection and government zone analysis
+    ├── db.py                  # Database operations for lead management
+    └── email_notifier.py      # Email notification system
 ```
 
 ## Modules
@@ -105,11 +147,20 @@ from utils.geo import CoordinateManager
 
 manager = CoordinateManager()
 
-# Convert single coordinate
+# Convert single coordinate (meters)
 lon, lat = manager.convert_minna_to_wgs84(
     easting=543210.50,
     northing=712345.20,
-    zone=26331  # Zone 31N
+    zone=26331,  # Zone 31N
+    units='meters'  # Default
+)
+
+# Convert coordinates in feet
+lon, lat = manager.convert_minna_to_wgs84(
+    easting=1782186.68,  # feet
+    northing=2338042.65,  # feet
+    zone=26331,
+    units='feet'  # Converts to meters internally
 )
 
 # Batch convert coordinates
@@ -117,7 +168,7 @@ coordinates = [
     {'easting': 543210.50, 'northing': 712345.20},
     {'easting': 543250.30, 'northing': 712345.20}
 ]
-converted = manager.batch_convert(coordinates, zone=26331)
+converted = manager.batch_convert(coordinates, zone=26331, units='meters')
 ```
 
 ### utils/ocr.py - Survey Data Extraction
