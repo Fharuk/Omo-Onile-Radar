@@ -11,6 +11,8 @@ import folium
 from streamlit_folium import st_folium
 from typing import Optional, Dict, Any, List
 import logging
+import pandas as pd
+from datetime import datetime
 from utils.ocr import extract_survey_data, OCRError, OCRValidationError, format_coordinates_summary
 from utils.geo import (
     CoordinateManager, 
@@ -18,6 +20,7 @@ from utils.geo import (
     CoordinateValidationError
 )
 from utils.risk_engine import RiskRadar, RiskAnalysisError, CoordinateValidationError as RiskCoordinateValidationError
+from utils import db
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +28,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Initialize database
+try:
+    db.init_db()
+except Exception as e:
+    st.error(f"Critical Error: Failed to initialize database. {str(e)}")
+    logger.critical("Database initialization failed: %s", e)
 
 # Page configuration
 st.set_page_config(
@@ -64,6 +74,14 @@ def initialize_session_state():
         st.session_state.demo_mode = False
     if 'risk_assessment' not in st.session_state:
         st.session_state.risk_assessment = None
+    if 'is_admin' not in st.session_state:
+        st.session_state.is_admin = False
+    if 'show_form' not in st.session_state:
+        st.session_state.show_form = False
+    if 'form_submitted' not in st.session_state:
+        st.session_state.form_submitted = False
+    if 'request_id' not in st.session_state:
+        st.session_state.request_id = None
 
 
 def mask_api_key(api_key: str) -> str:
@@ -83,6 +101,31 @@ def mask_api_key(api_key: str) -> str:
 
 def render_sidebar():
     """Render the sidebar with API key input and region selection."""
+    st.sidebar.divider()
+    st.sidebar.markdown("🔐 **Admin Access**")
+    admin_password = st.sidebar.text_input(
+        "Admin Password", 
+        type="password", 
+        key="admin_pwd",
+        help="Enter admin password to access lead dashboard"
+    )
+    
+    if admin_password == db.ADMIN_PASSWORD:
+        st.session_state.is_admin = True
+        st.sidebar.success("✅ Admin Authenticated")
+        if st.sidebar.button("Logout"):
+            # Clear password to logout
+            st.session_state.is_admin = False
+            # We can't easily clear the text_input from here without rerunning or using a different key
+            # but setting is_admin to False is enough if we check it.
+            # Actually, to logout we might need to reset the text_input value if possible, 
+            # but Streamlit doesn't allow easy programmatic reset of widgets except by changing key.
+            # A simple way is just to tell user to clear the password field.
+            st.info("Please clear the password field to logout.")
+        return # Hide other sidebar content
+
+    st.session_state.is_admin = False
+    
     st.sidebar.title("⚙️ Configuration")
     
     # Demo Mode Toggle
@@ -625,6 +668,155 @@ def perform_risk_assessment(
         return None
 
 
+def render_admin_dashboard():
+    """Render the admin dashboard for managing leads."""
+    st.header("👨‍💼 Admin Dashboard")
+    
+    try:
+        requests = db.get_all_requests()
+    except Exception as e:
+        st.error(f"Error fetching requests: {e}")
+        return
+
+    # Metric cards
+    total_leads = len(requests)
+    pending_leads = len([r for r in requests if r['status'] == 'PENDING'])
+    contacted_leads = len([r for r in requests if r['status'] == 'CONTACTED'])
+    completed_leads = len([r for r in requests if r['status'] == 'COMPLETED'])
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Leads", total_leads)
+    m2.metric("Pending Leads", pending_leads)
+    m3.metric("Contacted", contacted_leads)
+    m4.metric("Completed", completed_leads)
+    
+    if not requests:
+        st.info("No lead requests found yet.")
+        return
+
+    # Create DataFrame for display
+    df = pd.DataFrame(requests)
+    
+    # Format risk status for display
+    def format_risk(status):
+        if status == 'DANGER': return "🔴 DANGER"
+        if status == 'CAUTION': return "🟡 CAUTION"
+        if status == 'SAFE': return "🟢 SAFE"
+        return status
+
+    display_df = df.copy()
+    display_df['risk_status'] = display_df['risk_status'].apply(format_risk)
+    
+    # Reorder and rename columns for nice display
+    column_mapping = {
+        'id': 'ID',
+        'name': 'Name',
+        'phone': 'Phone',
+        'email': 'Email',
+        'survey_plan_number': 'Survey #',
+        'risk_status': 'Risk Status',
+        'location_text': 'Location',
+        'status': 'Status',
+        'timestamp': 'Timestamp',
+        'notes': 'Notes'
+    }
+    # Only include columns that exist in the mapping
+    available_cols = [col for col in column_mapping.keys() if col in display_df.columns]
+    display_df = display_df[available_cols].rename(columns={col: column_mapping[col] for col in available_cols})
+    
+    st.subheader("All Lead Requests")
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    st.divider()
+    st.subheader("Update Lead Status")
+    
+    # Update Status Section
+    with st.expander("📝 Edit Lead Status", expanded=True):
+        col1, col2, col3 = st.columns([1, 2, 3])
+        with col1:
+            lead_id = st.number_input("Lead ID", min_value=1, step=1)
+        with col2:
+            new_status = st.selectbox(
+                "New Status", 
+                options=["PENDING", "CONTACTED", "COMPLETED", "REJECTED"]
+            )
+        with col3:
+            admin_notes = st.text_input("Admin Notes")
+            
+        if st.button("Save Changes"):
+            update_res = db.update_request_status(lead_id, new_status, admin_notes)
+            if update_res['success']:
+                st.success(f"Lead #{lead_id} updated successfully!")
+                st.rerun()
+            else:
+                st.error(update_res['message'])
+
+
+def render_lead_form(extraction_results: Dict[str, Any], risk_assessment: Dict[str, Any]):
+    """
+    Render the lead capture form for surveyor verification.
+    """
+    st.divider()
+    st.subheader("⚡ Need 100% Certainty?")
+    st.write("Our AI assessment is helpful but not legally binding. Get peace of mind with professional verification from our partner surveyors.")
+    
+    if not st.session_state.show_form and not st.session_state.form_submitted:
+        if st.button("📋 Request Official Surveyor Charting (₦15,000)", type="primary"):
+            st.session_state.show_form = True
+            st.rerun()
+    
+    if st.session_state.show_form and not st.session_state.form_submitted:
+        with st.form("surveyor_request_form"):
+            st.markdown("### Verification Request Form")
+            name = st.text_input("Full Name", placeholder="John Doe", key="req_name_input")
+            phone = st.text_input("Phone Number", placeholder="+234 901 234 5678", key="req_phone_input")
+            email = st.text_input("Email Address", placeholder="john@example.com", key="req_email_input")
+            
+            # Hidden data collected from results
+            survey_plan_number = extraction_results.get('survey_number') if extraction_results else None
+            risk_status = risk_assessment.get('status') if risk_assessment else 'PENDING'
+            location_text = extraction_results.get('location_text') if extraction_results else None
+            
+            submit_button = st.form_submit_button("Submit Request")
+            
+            if submit_button:
+                # Basic empty check for name, phone, email
+                if not name or not phone or not email:
+                    st.error("Please fill in all required fields.")
+                else:
+                    result = db.save_request(
+                        name=name,
+                        phone=phone,
+                        email=email,
+                        survey_plan_number=survey_plan_number,
+                        risk_status=risk_status,
+                        location_text=location_text
+                    )
+                    
+                    if result['success']:
+                        st.session_state.form_submitted = True
+                        st.session_state.request_id = result['id']
+                        st.session_state.show_form = False
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to submit request: {result['message']}")
+                    
+    elif st.session_state.form_submitted:
+        st.success(f"""
+        ✅ **Request Received!**
+        
+        Thank you for choosing Omo-Onile Radar. A partner surveyor will contact you 
+        on WhatsApp within 24 hours at your provided phone number.
+        
+        Reference ID: **{st.session_state.request_id}**
+        """)
+        if st.button("Submit Another Request"):
+            st.session_state.form_submitted = False
+            st.session_state.show_form = False
+            st.session_state.request_id = None
+            st.rerun()
+
+
 def main():
     """Main application entry point."""
     # Initialize session state
@@ -633,6 +825,11 @@ def main():
     # Render sidebar
     render_sidebar()
     
+    # Check if admin is logged in
+    if st.session_state.get('is_admin', False):
+        render_admin_dashboard()
+        return
+
     # Main content area
     st.title("🗺️ Omo-Onile Radar")
     st.markdown(
@@ -748,8 +945,6 @@ def main():
                     # Display coordinate table
                     st.subheader("📊 Coordinate Details")
                     
-                    import pandas as pd
-                    
                     # Create DataFrame for display
                     coord_data = []
                     for idx, coord in enumerate(st.session_state.converted_coordinates, 1):
@@ -772,6 +967,9 @@ def main():
                         file_name=f"coordinates_{st.session_state.extraction_results.get('survey_number', 'demo')}.csv",
                         mime="text/csv"
                     )
+
+                    # Lead capture form
+                    render_lead_form(st.session_state.extraction_results, st.session_state.risk_assessment)
     else:
         # Regular file upload mode
         uploaded_file = st.session_state.uploaded_file
@@ -890,8 +1088,6 @@ def main():
                         # Display coordinate table
                         st.subheader("📊 Coordinate Details")
                         
-                        import pandas as pd
-                        
                         # Create DataFrame for display
                         coord_data = []
                         for idx, coord in enumerate(st.session_state.converted_coordinates, 1):
@@ -914,6 +1110,9 @@ def main():
                             file_name=f"coordinates_{st.session_state.extraction_results.get('survey_number', 'survey')}.csv",
                             mime="text/csv"
                         )
+                        
+                        # Lead capture form
+                        render_lead_form(st.session_state.extraction_results, st.session_state.risk_assessment)
         else:
             # No file uploaded yet
             st.info("👆 Upload a survey plan image to get started")
@@ -952,6 +1151,7 @@ def main():
         <div style="text-align: center; color: #666; padding: 2rem 0 1rem 0;">
             <p>Built with ❤️ for the Nigerian Real Estate Market</p>
             <p><em>Now with Intelligent Risk Detection</em></p>
+            <p><small><strong>Lead Capture Note:</strong> Your information is securely stored and used only for surveyor coordination. We respect your privacy.</small></p>
         </div>
         """,
         unsafe_allow_html=True
