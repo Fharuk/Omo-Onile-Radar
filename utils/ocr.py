@@ -112,7 +112,8 @@ def extract_survey_data(
     image_bytes: bytes, 
     api_key: str,
     max_retries: int = 3,
-    retry_delay: int = 2
+    retry_delay: int = 2,
+    use_demo_data: bool = False
 ) -> Dict[str, Any]:
     """
     Extract survey data from a survey plan image using OpenAI Vision API.
@@ -132,6 +133,7 @@ def extract_survey_data(
         api_key: OpenAI API key
         max_retries: Maximum number of retry attempts for transient failures
         retry_delay: Delay in seconds between retries (doubles after each attempt)
+        use_demo_data: If True, bypass API and return hardcoded demo data
     
     Returns:
         Dictionary containing:
@@ -153,6 +155,23 @@ def extract_survey_data(
         >>> print(result['survey_number'])
         'LS/123/2023'
     """
+    if use_demo_data:
+        logger.info("Using demo data mode - bypassing OpenAI API")
+        return {
+            'survey_number': 'DEMO-2024-001',
+            'surveyor_name': 'Demo Surveyor & Associates',
+            'location_text': 'Lekki, Lagos - Restricted Zone Test Case',
+            'coordinates': [
+                {'easting': 700000, 'northing': 651500},  # Inside Lekki Gov Zone
+                {'easting': 701000, 'northing': 651500},
+                {'easting': 701000, 'northing': 650500},
+                {'easting': 700000, 'northing': 650500}
+            ],
+            'red_flags': ['Overlaps with Government Acquisition Zone'],
+            'demo_mode': True
+        }
+    
+    # Demo mode validation - require API key and image for non-demo mode
     if not api_key:
         error_msg = "OpenAI API key is required"
         logger.error(error_msg)

@@ -5,3 +5,4 @@ pyproj==3.6.1
 openai==1.6.1
 python-dotenv==1.0.0
 Pillow==10.1.0
+shapely>=2.0.1
