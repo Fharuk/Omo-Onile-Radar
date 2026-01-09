@@ -400,8 +400,8 @@ def extract_with_gemini(image_bytes: bytes, api_key: str) -> Dict[str, Any]:
         # Configure Gemini API
         genai.configure(api_key=api_key)
         
-        # Use the appropriate Gemini model (Gemini 1.5 Pro for better accuracy)
-        model = genai.GenerativeModel('gemini-1.5-pro')
+        # Use the appropriate Gemini model (Gemini 2.5 Pro for better accuracy)
+        model = genai.GenerativeModel('gemini-2.5-pro')
         
         # Convert image bytes to a format suitable for Gemini
         from PIL import Image
