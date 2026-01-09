@@ -87,6 +87,8 @@ def initialize_session_state():
         st.session_state.coordinate_units = 'meters'
     if 'edited_coordinates' not in st.session_state:
         st.session_state.edited_coordinates = None
+    if 'ai_provider' not in st.session_state:
+        st.session_state.ai_provider = 'openai'
 
 
 def mask_api_key(api_key: str) -> str:
@@ -154,14 +156,14 @@ def render_sidebar():
     # AI Provider Selection (only shown when not in demo mode)
     if not st.session_state.demo_mode:
         st.sidebar.subheader("🤖 AI Provider")
-        ai_provider_options = ["OpenAI GPT-4o", "Google Gemini 1.5 Flash"]
+        ai_provider_options = ["OpenAI GPT-4o", "Google Gemini 2.5 Pro"]
         ai_provider_index = 0 if st.session_state.get('ai_provider', 'openai') == 'openai' else 1
         
         selected_provider = st.sidebar.selectbox(
             "Select AI Provider",
             options=ai_provider_options,
             index=ai_provider_index,
-            help="Choose between OpenAI GPT-4o or Google Gemini for document analysis"
+            help="Choose between OpenAI GPT-4o or Google Gemini 2.5 Pro for document analysis"
         )
         
         # Update session state based on selection
@@ -191,17 +193,17 @@ def render_sidebar():
         # Not visible in demo mode, but set default values
         api_key_input = ""
         provider_key_label = "OpenAI API Key"
-    
-    if not api_key_disabled and api_key_input != st.session_state.api_key:
+
+    if (not st.session_state.demo_mode) and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
         st.session_state.file_processed = False
-    
+
     if st.session_state.demo_mode:
         st.sidebar.success("🧪 Demo Mode Active")
     elif st.session_state.api_key:
         st.sidebar.success(f"API Key: {mask_api_key(st.session_state.api_key)}")
     else:
-        st.sidebar.warning("⚠️ Please enter your OpenAI API key to continue")
+        st.sidebar.warning(f"⚠️ Please enter your {provider_key_label} to continue")
     
     st.sidebar.markdown("---")
     
@@ -1017,10 +1019,12 @@ def main():
     
     # Check if we can proceed (API key or demo mode)
     if not st.session_state.api_key and not st.session_state.demo_mode:
-        st.warning("⚠️ Please enter your OpenAI API key in the sidebar or enable demo mode to continue.")
-        st.info(
-            "👉 Don't have an API key? Get one from [OpenAI Platform](https://platform.openai.com/api-keys)"
+        provider_key_label = (
+            "OpenAI API Key"
+            if st.session_state.get("ai_provider", "openai") == "openai"
+            else "Google Gemini API Key"
         )
+        st.warning(f"⚠️ Please enter your {provider_key_label} in the sidebar or enable demo mode to continue.")
         return
     
     # File uploader or demo mode indicator

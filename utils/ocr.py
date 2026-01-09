@@ -1,13 +1,16 @@
-"""
-Survey data extraction module using OpenAI Vision API.
+"""utils.ocr
 
-This module uses OpenAI's GPT-4 Vision model to extract structured data from
-survey plan images, including coordinates, survey metadata, and potential red flags.
+Survey data extraction module using multimodal AI providers.
+
+Supports:
+- OpenAI (GPT-4o)
+- Google Gemini (Gemini 2.5 Pro by default)
 """
 
 import base64
 import json
 import logging
+import os
 import time
 from typing import Dict, Any, Optional, List
 from io import BytesIO
@@ -399,10 +402,11 @@ def extract_with_gemini(image_bytes: bytes, api_key: str) -> Dict[str, Any]:
     try:
         # Configure Gemini API
         genai.configure(api_key=api_key)
-        
-        # Use the appropriate Gemini model (default to 1.5 Flash for speed and cost)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
+
+        # Default to Gemini 2.5 Pro (as requested). Allow override via env var.
+        gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+        model = genai.GenerativeModel(gemini_model_name)
+
         # Convert image bytes to a format suitable for Gemini
         from PIL import Image
         image = Image.open(BytesIO(image_bytes))
@@ -454,7 +458,22 @@ Example output format:
         prompt = f"{system_prompt}\n\nPlease analyze this survey plan image and extract the requested information in JSON format."
         
         # Generate content with image
-        response = model.generate_content([prompt, image])
+        try:
+            response = model.generate_content([prompt, image])
+        except Exception as e:
+            # Some environments/libraries may not yet support newer model names.
+            # If the requested model fails, attempt a single fallback to a widely available model.
+            if gemini_model_name != "gemini-1.5-pro":
+                logger.warning(
+                    "Gemini model '%s' failed; falling back to 'gemini-1.5-pro'. Error: %s",
+                    gemini_model_name,
+                    str(e),
+                    exc_info=True,
+                )
+                model = genai.GenerativeModel("gemini-1.5-pro")
+                response = model.generate_content([prompt, image])
+            else:
+                raise
         
         # Extract the text response
         content = response.text
