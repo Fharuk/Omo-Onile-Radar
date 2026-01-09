@@ -21,6 +21,7 @@ from utils.geo import (
 )
 from utils.risk_engine import RiskRadar, RiskAnalysisError, CoordinateValidationError as RiskCoordinateValidationError
 from utils import db
+from utils.email_notifier import send_lead_notification, validate_lead_data
 
 # Configure logging
 logging.basicConfig(
@@ -82,6 +83,10 @@ def initialize_session_state():
         st.session_state.form_submitted = False
     if 'request_id' not in st.session_state:
         st.session_state.request_id = None
+    if 'coordinate_units' not in st.session_state:
+        st.session_state.coordinate_units = 'meters'
+    if 'edited_coordinates' not in st.session_state:
+        st.session_state.edited_coordinates = None
 
 
 def mask_api_key(api_key: str) -> str:
@@ -202,6 +207,27 @@ def render_sidebar():
     
     st.sidebar.markdown("---")
     
+    # Coordinate Units Selection
+    st.sidebar.subheader("📏 Coordinate Units")
+    coordinate_units = st.sidebar.radio(
+        "Select coordinate units",
+        options=['meters', 'feet'],
+        index=0 if st.session_state.coordinate_units == 'meters' else 1,
+        help="Choose the unit of measurement for your survey coordinates"
+    )
+    
+    if coordinate_units != st.session_state.coordinate_units:
+        st.session_state.coordinate_units = coordinate_units
+        st.session_state.converted_coordinates = None  # Clear old conversions
+        st.session_state.risk_assessment = None
+    
+    st.sidebar.info(
+        f"📐 Current Units: **{coordinate_units.upper()}**\n\n"
+        f"{'Coordinates will be converted to meters before projection' if coordinate_units == 'feet' else 'Using meters (default)'}"
+    )
+    
+    st.sidebar.markdown("---")
+    
     # Information
     st.sidebar.subheader("ℹ️ About")
     st.sidebar.markdown(
@@ -306,6 +332,65 @@ def render_risk_alert(risk_result: Dict[str, Any]):
         )
 
 
+def display_editable_coordinates(coordinates: List[Dict[str, float]], units: str = 'meters') -> List[Dict[str, float]]:
+    """
+    Display coordinates in an editable data editor and return edited values.
+    
+    Args:
+        coordinates: List of coordinate dictionaries with 'easting' and 'northing' keys
+        units: Unit of measurement for display
+    
+    Returns:
+        List of edited coordinate dictionaries
+    """
+    st.subheader("📝 Review & Edit Coordinates")
+    st.info(
+        "📝 **Review the extracted coordinates below.** "
+        f"You can edit any values directly in the table. Units: **{units.upper()}**"
+    )
+    
+    # Prepare DataFrame for editing
+    coord_data = []
+    for idx, coord in enumerate(coordinates, 1):
+        coord_data.append({
+            'Point': idx,
+            f'Easting ({units})': float(coord['easting']),
+            f'Northing ({units})': float(coord['northing'])
+        })
+    
+    df = pd.DataFrame(coord_data)
+    
+    # Use data_editor for editable table
+    edited_df = st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",  # Allow adding/removing rows
+        key=f"coord_editor_{id(coordinates)}"  # Unique key based on coordinate data
+    )
+    
+    # Convert edited DataFrame back to coordinate dictionaries
+    edited_coordinates = []
+    for _, row in edited_df.iterrows():
+        edited_coordinates.append({
+            'easting': float(row[f'Easting ({units})']),
+            'northing': float(row[f'Northing ({units})'])
+        })
+    
+    # Show change indicator
+    if len(edited_coordinates) != len(coordinates):
+        st.warning(f"⚠️ Number of points changed: {len(coordinates)} → {len(edited_coordinates)}")
+    else:
+        changes = 0
+        for orig, edited in zip(coordinates, edited_coordinates):
+            if orig['easting'] != edited['easting'] or orig['northing'] != edited['northing']:
+                changes += 1
+        if changes > 0:
+            st.success(f"✏️ {changes} coordinate(s) modified")
+    
+    return edited_coordinates
+
+
 def display_extraction_results(results: Dict[str, Any]):
     """
     Display extracted survey data in a user-friendly format.
@@ -392,18 +477,19 @@ def create_enhanced_map_visualization(
         default_center = [first_coord['latitude'], first_coord['longitude']]
         zoom_start = 12
     
-    # Create map
+    # Create map with Street view as default
     m = folium.Map(
         location=default_center,
         zoom_start=zoom_start,
-        tiles='OpenStreetMap'
+        tiles='OpenStreetMap',
+        name='Street View'
     )
     
-    # Add satellite imagery layer option
+    # Add Esri World Imagery satellite layer
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google Satellite',
-        name='Satellite View',
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri World Imagery',
+        name='Satellite',
         overlay=False,
         control=True
     ).add_to(m)
@@ -591,7 +677,8 @@ def process_survey_image(image_bytes: bytes, api_key: str, use_demo: bool = Fals
 def convert_coordinates(
     coordinates: List[Dict[str, float]], 
     zone: int,
-    coord_manager: CoordinateManager
+    coord_manager: CoordinateManager,
+    units: str = 'meters'
 ) -> Optional[List[Dict[str, float]]]:
     """
     Convert coordinates from Minna Datum to WGS84.
@@ -600,14 +687,15 @@ def convert_coordinates(
         coordinates: List of coordinate dictionaries
         zone: Zone EPSG code
         coord_manager: CoordinateManager instance
+        units: Unit of measurement ('meters' or 'feet')
     
     Returns:
         List of converted coordinates or None if conversion fails
     """
     try:
-        with st.spinner("📐 Converting coordinates..."):
-            converted = coord_manager.batch_convert(coordinates, zone)
-            logger.info(f"Successfully converted {len(converted)} coordinates")
+        with st.spinner(f"📐 Converting coordinates ({units})..."):
+            converted = coord_manager.batch_convert(coordinates, zone, units)
+            logger.info(f"Successfully converted {len(converted)} coordinates from {units}")
             return converted
             
     except CoordinateValidationError as e:
@@ -784,22 +872,84 @@ def render_lead_form(extraction_results: Dict[str, Any], risk_assessment: Dict[s
                 if not name or not phone or not email:
                     st.error("Please fill in all required fields.")
                 else:
-                    result = db.save_request(
-                        name=name,
-                        phone=phone,
-                        email=email,
-                        survey_plan_number=survey_plan_number,
-                        risk_status=risk_status,
-                        location_text=location_text
-                    )
+                    # Validate lead data
+                    validation_result = validate_lead_data(name, phone, email)
                     
-                    if result['success']:
-                        st.session_state.form_submitted = True
-                        st.session_state.request_id = result['id']
-                        st.session_state.show_form = False
-                        st.rerun()
+                    if not validation_result['valid']:
+                        st.error(validation_result['error'])
                     else:
-                        st.error(f"Failed to submit request: {result['message']}")
+                        # Try to send email notification if credentials are configured
+                        email_sent = False
+                        email_error = None
+                        
+                        try:
+                            # Check if email credentials are in secrets
+                            if hasattr(st, 'secrets') and 'email' in st.secrets:
+                                admin_email = st.secrets['email'].get('admin_email', '')
+                                admin_password = st.secrets['email'].get('admin_password', '')
+                                
+                                if admin_email and admin_password:
+                                    lead_data = {
+                                        'name': name,
+                                        'phone': phone,
+                                        'email': email,
+                                        'survey_plan_number': survey_plan_number,
+                                        'risk_status': risk_status,
+                                        'location_text': location_text
+                                    }
+                                    
+                                    email_result = send_lead_notification(
+                                        admin_email,
+                                        admin_password,
+                                        lead_data
+                                    )
+                                    
+                                    if email_result['success']:
+                                        email_sent = True
+                                        logger.info(f"Email notification sent for lead: {name}")
+                                    else:
+                                        email_error = email_result['message']
+                                        logger.warning(f"Email notification failed: {email_error}")
+                                else:
+                                    logger.info("Email credentials not configured in secrets")
+                            else:
+                                logger.info("Secrets not configured for email notifications")
+                        except Exception as e:
+                            email_error = str(e)
+                            logger.error(f"Exception sending email: {e}", exc_info=True)
+                        
+                        # Also save to database as backup
+                        db_result = db.save_request(
+                            name=name,
+                            phone=phone,
+                            email=email,
+                            survey_plan_number=survey_plan_number,
+                            risk_status=risk_status,
+                            location_text=location_text
+                        )
+                        
+                        # Consider submission successful if either email or DB save succeeds
+                        if email_sent or db_result['success']:
+                            st.session_state.form_submitted = True
+                            st.session_state.request_id = db_result.get('id', 'N/A')
+                            st.session_state.show_form = False
+                            
+                            # Show success message with email status
+                            if email_sent:
+                                st.success("✅ Request submitted and admin notified via email!")
+                            elif db_result['success']:
+                                st.success("✅ Request submitted successfully!")
+                                if email_error:
+                                    st.warning(f"⚠️ Email notification failed: {email_error}")
+                            
+                            st.rerun()
+                        else:
+                            error_msg = "Failed to submit request. "
+                            if email_error:
+                                error_msg += f"Email error: {email_error}. "
+                            if not db_result['success']:
+                                error_msg += f"Database error: {db_result['message']}"
+                            st.error(error_msg)
                     
     elif st.session_state.form_submitted:
         st.success(f"""
@@ -895,17 +1045,28 @@ def main():
             if not coordinates:
                 st.warning("⚠️ No coordinates were found in the demo data.")
             else:
-                # Convert coordinates if not already converted
-                if st.session_state.converted_coordinates is None:
+                # Display editable coordinates
+                edited_coordinates = display_editable_coordinates(
+                    coordinates, 
+                    st.session_state.coordinate_units
+                )
+                
+                st.markdown("---")
+                
+                # Convert coordinates if not already converted or if coordinates were edited
+                if st.session_state.converted_coordinates is None or edited_coordinates != coordinates:
                     coord_manager = get_coordinate_manager()
                     converted = convert_coordinates(
-                        coordinates,
+                        edited_coordinates,
                         st.session_state.region,
-                        coord_manager
+                        coord_manager,
+                        st.session_state.coordinate_units
                     )
                     
                     if converted:
                         st.session_state.converted_coordinates = converted
+                        # Reset risk assessment when coordinates change
+                        st.session_state.risk_assessment = None
                 
                 # Perform risk assessment
                 if st.session_state.converted_coordinates and not st.session_state.risk_assessment:
@@ -1038,17 +1199,28 @@ def main():
                         "Please ensure the image is clear and contains coordinate information."
                     )
                 else:
-                    # Convert coordinates if not already converted
-                    if st.session_state.converted_coordinates is None:
+                    # Display editable coordinates
+                    edited_coordinates = display_editable_coordinates(
+                        coordinates, 
+                        st.session_state.coordinate_units
+                    )
+                    
+                    st.markdown("---")
+                    
+                    # Convert coordinates if not already converted or if coordinates were edited
+                    if st.session_state.converted_coordinates is None or edited_coordinates != coordinates:
                         coord_manager = get_coordinate_manager()
                         converted = convert_coordinates(
-                            coordinates,
+                            edited_coordinates,
                             st.session_state.region,
-                            coord_manager
+                            coord_manager,
+                            st.session_state.coordinate_units
                         )
                         
                         if converted:
                             st.session_state.converted_coordinates = converted
+                            # Reset risk assessment when coordinates change
+                            st.session_state.risk_assessment = None
                     
                     # Perform risk assessment
                     if st.session_state.converted_coordinates and not st.session_state.risk_assessment:
