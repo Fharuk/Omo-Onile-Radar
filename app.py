@@ -2,8 +2,8 @@
 Omo-Onile Radar - Real Estate Due Diligence Tool for Nigerian Market
 
 A Streamlit application that uses AI-powered OCR to extract survey plan data,
-transform coordinates from Nigerian Minna Datum to WGS84, and visualize property
-boundaries on an interactive map.
+transform coordinates from Nigerian Minna Datum to WGS84, visualize property
+boundaries on an interactive map, and perform intelligent risk detection.
 """
 
 import streamlit as st
@@ -17,6 +17,7 @@ from utils.geo import (
     CoordinateTransformationError, 
     CoordinateValidationError
 )
+from utils.risk_engine import RiskRadar, RiskAnalysisError, CoordinateValidationError as RiskCoordinateValidationError
 
 # Configure logging
 logging.basicConfig(
@@ -33,11 +34,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize coordinate manager
+# Initialize coordinate manager and risk radar
 @st.cache_resource
 def get_coordinate_manager() -> CoordinateManager:
     """Initialize and cache the coordinate manager."""
     return CoordinateManager()
+
+@st.cache_resource
+def get_risk_radar() -> RiskRadar:
+    """Initialize and cache the risk radar."""
+    return RiskRadar()
 
 
 def initialize_session_state():
@@ -54,6 +60,10 @@ def initialize_session_state():
         st.session_state.converted_coordinates = None
     if 'file_processed' not in st.session_state:
         st.session_state.file_processed = False
+    if 'demo_mode' not in st.session_state:
+        st.session_state.demo_mode = False
+    if 'risk_assessment' not in st.session_state:
+        st.session_state.risk_assessment = None
 
 
 def mask_api_key(api_key: str) -> str:
@@ -75,20 +85,47 @@ def render_sidebar():
     """Render the sidebar with API key input and region selection."""
     st.sidebar.title("⚙️ Configuration")
     
-    # API Key Input
+    # Demo Mode Toggle
+    st.sidebar.subheader("🧪 Demo Mode")
+    demo_mode = st.sidebar.checkbox(
+        "Use Demo Data (No API Key Required)",
+        value=st.session_state.demo_mode,
+        help="Demo mode uses test coordinates that trigger risk alerts"
+    )
+    
+    if demo_mode != st.session_state.demo_mode:
+        st.session_state.demo_mode = demo_mode
+        st.session_state.file_processed = False
+        st.session_state.risk_assessment = None
+    
+    if st.session_state.demo_mode:
+        st.sidebar.info("🧪 Using demo coordinates that overlap with restricted zones")
+    
+    st.sidebar.markdown("---")
+    
+    # API Key Input (disabled in demo mode)
     st.sidebar.subheader("OpenAI API Key")
+    api_key_disabled = st.session_state.demo_mode
+    api_key_help = (
+        "Demo mode active - API key not required" if api_key_disabled
+        else "Your API key is required to process survey plans with AI"
+    )
+    
     api_key_input = st.sidebar.text_input(
         "Enter your OpenAI API key",
         type="password",
         value=st.session_state.api_key,
-        help="Your API key is required to process survey plans with AI"
+        disabled=api_key_disabled,
+        help=api_key_help
     )
     
-    if api_key_input != st.session_state.api_key:
+    if not api_key_disabled and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
         st.session_state.file_processed = False
     
-    if st.session_state.api_key:
+    if st.session_state.demo_mode:
+        st.sidebar.success("🧪 Demo Mode Active")
+    elif st.session_state.api_key:
         st.sidebar.success(f"API Key: {mask_api_key(st.session_state.api_key)}")
     else:
         st.sidebar.warning("⚠️ Please enter your OpenAI API key to continue")
@@ -113,6 +150,7 @@ def render_sidebar():
     if new_region != st.session_state.region:
         st.session_state.region = new_region
         st.session_state.converted_coordinates = None  # Clear old conversions
+        st.session_state.risk_assessment = None
     
     st.sidebar.info(
         f"📍 Selected: {selected_region}\n\n"
@@ -130,7 +168,13 @@ def render_sidebar():
         1. 🔍 Extracting data from survey plans using AI
         2. 📐 Converting Minna Datum coordinates to WGS84
         3. 🗺️ Visualizing property boundaries on a map
-        4. ⚠️ Identifying potential red flags
+        4. 🚨 **NEW: Intelligent risk detection for government zones**
+        
+        **Features:**
+        - ⚠️ Government acquisition zone detection
+        - 🛡️ Military reserve identification
+        - 🌊 Waterfront restriction alerts
+        - 🧪 Demo mode for testing without API
         
         **Supported Formats:** PNG, JPG, JPEG
         """
@@ -171,6 +215,54 @@ def render_metadata_card(title: str, content: str, icon: str = "📋", is_warnin
     )
 
 
+def render_risk_alert(risk_result: Dict[str, Any]):
+    """
+    Display risk assessment alerts based on the result.
+    
+    Args:
+        risk_result: Risk assessment result from RiskRadar
+    """
+    status = risk_result.get('status', 'SAFE')
+    message = risk_result.get('message', '')
+    intersections = risk_result.get('intersections', [])
+    recommendations = risk_result.get('recommendations', [])
+    
+    if status == 'DANGER':
+        st.error(
+            f"🚨 **CRITICAL RISK ALERT** 🚨\n\n"
+            f"{message}\n\n"
+            f"**Immediate Actions Required:**\n"
+            + "\n".join([f"• {rec}" for rec in recommendations[:3]])
+        )
+        
+        # Show intersection details if available
+        if intersections:
+            st.markdown("**⚠️ Intersecting Zones:**")
+            for intersection in intersections:
+                st.markdown(
+                    f"- **{intersection['zone_name']}**\n"
+                    f"  - Type: {intersection['zone_type']}\n"
+                    f"  - Overlap: {intersection['overlap_percentage']}%\n"
+                    f"  - Severity: {intersection['severity']}"
+                )
+                
+    elif status == 'CAUTION':
+        st.warning(
+            f"⚠️ **CAUTION: Potential Risk Detected** ⚠️\n\n"
+            f"{message}\n\n"
+            f"**Recommendations:**\n"
+            + "\n".join([f"• {rec}" for rec in recommendations[:2]])
+        )
+        
+    else:  # SAFE
+        st.success(
+            f"✅ **Preliminary Risk Assessment: SAFE**\n\n"
+            f"{message}\n\n"
+            f"**Note:** Government records are manually maintained. "
+            f"Request official verification for final confirmation."
+        )
+
+
 def display_extraction_results(results: Dict[str, Any]):
     """
     Display extracted survey data in a user-friendly format.
@@ -179,6 +271,10 @@ def display_extraction_results(results: Dict[str, Any]):
         results: Dictionary containing extracted survey data
     """
     st.subheader("📄 Survey Information")
+    
+    # Check if demo mode
+    if results.get('demo_mode', False):
+        st.info("🧪 **Demo Mode - Test Data**")
     
     col1, col2 = st.columns(2)
     
@@ -227,16 +323,18 @@ def display_extraction_results(results: Dict[str, Any]):
         st.info(f"📐 Found {len(coordinates)} coordinate points")
 
 
-def create_map_visualization(
+def create_enhanced_map_visualization(
     converted_coords: List[Dict[str, float]], 
-    survey_info: Dict[str, Any]
+    survey_info: Dict[str, Any],
+    risk_result: Optional[Dict[str, Any]] = None
 ) -> folium.Map:
     """
-    Create a Folium map with property boundaries and markers.
+    Create a Folium map with property boundaries, government zones, and risk visualization.
     
     Args:
         converted_coords: List of converted coordinates with lat/lon
         survey_info: Survey metadata for marker tooltips
+        risk_result: Risk assessment result for zone visualization
     
     Returns:
         Folium map object
@@ -249,7 +347,7 @@ def create_map_visualization(
     if converted_coords and len(converted_coords) > 0:
         first_coord = converted_coords[0]
         default_center = [first_coord['latitude'], first_coord['longitude']]
-        zoom_start = 18
+        zoom_start = 12
     
     # Create map
     m = folium.Map(
@@ -267,10 +365,55 @@ def create_map_visualization(
         control=True
     ).add_to(m)
     
-    # Add layer control
-    folium.LayerControl().add_to(m)
+    # Add government zones layer
+    risk_radar = get_risk_radar()
+    all_zones = risk_radar.get_all_zones()
+    
+    zone_group = folium.FeatureGroup(name="🚨 Government Restricted Zones")
+    
+    for zone_id, zone_data in all_zones.items():
+        coordinates = zone_data['coordinates']
+        polygon_coords = [[coord[1], coord[0]] for coord in coordinates]  # Convert (lon, lat) to (lat, lon)
+        polygon_coords.append(polygon_coords[0])  # Close polygon
+        
+        # Color based on severity
+        if zone_data['severity_level'] == 'HIGH':
+            color = 'red'
+            fill_color = 'red'
+        else:
+            color = 'orange'
+            fill_color = 'orange'
+        
+        # Create popup content
+        popup_html = f"""
+        <div style="font-family: Arial, sans-serif; min-width: 250px;">
+            <h4 style="margin: 0 0 10px 0; color: #d32f2f;">{zone_data['zone_name']}</h4>
+            <table style="width: 100%;">
+                <tr><td><b>Type:</b></td><td>{zone_data['zone_type']}</td></tr>
+                <tr><td><b>Severity:</b></td><td>{zone_data['severity_level']}</td></tr>
+                <tr><td><b>Acquired:</b></td><td>{zone_data['acquisition_date']}</td></tr>
+                <tr><td colspan="2" style="padding-top: 10px; border-top: 1px solid #ccc;">
+                    <i>{zone_data['description']}</i>
+                </td></tr>
+            </table>
+        </div>
+        """
+        
+        folium.Polygon(
+            locations=polygon_coords,
+            color=color,
+            fill=True,
+            fill_color=fill_color,
+            fill_opacity=0.2,
+            weight=3,
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip=f"{zone_data['zone_name']} ({zone_data['zone_type']})"
+        ).add_to(zone_group)
+    
+    zone_group.add_to(m)
     
     if not converted_coords:
+        folium.LayerControl().add_to(m)
         return m
     
     # Extract lat/lon pairs for polygon
@@ -283,23 +426,25 @@ def create_map_visualization(
     if len(polygon_points) > 2:
         polygon_points.append(polygon_points[0])
     
-    # Draw polygon
+    # Draw user land polygon
+    user_land_group = folium.FeatureGroup(name="🏠 Your Property")
+    
     folium.Polygon(
         locations=polygon_points,
-        color='red',
+        color='blue',
         fill=True,
-        fill_color='red',
-        fill_opacity=0.2,
-        weight=3,
+        fill_color='cyan',
+        fill_opacity=0.5,
+        weight=2,
         popup=f"Survey: {survey_info.get('survey_number', 'Unknown')}"
-    ).add_to(m)
+    ).add_to(user_land_group)
     
     # Add markers for each corner
     for idx, coord in enumerate(converted_coords, 1):
         # Create popup content
         popup_html = f"""
         <div style="font-family: Arial, sans-serif; min-width: 200px;">
-            <h4 style="margin: 0 0 10px 0;">Point {idx}</h4>
+            <h4 style="margin: 0 0 10px 0;">Property Corner {idx}</h4>
             <table style="width: 100%;">
                 <tr>
                     <td><b>Latitude:</b></td>
@@ -329,30 +474,56 @@ def create_map_visualization(
         folium.Marker(
             location=[coord['latitude'], coord['longitude']],
             popup=folium.Popup(popup_html, max_width=300),
-            tooltip=f"Point {idx}",
-            icon=folium.Icon(color='red', icon='info-sign')
-        ).add_to(m)
+            tooltip=f"Corner {idx}",
+            icon=folium.Icon(color='blue', icon='home')
+        ).add_to(user_land_group)
+    
+    user_land_group.add_to(m)
+    
+    # Add intersection highlighting if risk detected
+    if risk_result and risk_result.get('intersections'):
+        intersection_group = folium.FeatureGroup(name="⚠️ Intersection Areas")
+        
+        for intersection in risk_result['intersections']:
+            # This would require calculating the actual intersection geometry
+            # For now, we'll add a marker at the centroid of the user property
+            if polygon_points:
+                centroid_lat = sum(point[0] for point in polygon_points[:-1]) / len(polygon_points[:-1])
+                centroid_lon = sum(point[1] for point in polygon_points[:-1]) / len(polygon_points[:-1])
+                
+                folium.Marker(
+                    location=[centroid_lat, centroid_lon],
+                    popup=f"Intersection with {intersection['zone_name']}",
+                    tooltip=f"Overlap: {intersection['overlap_percentage']}%",
+                    icon=folium.Icon(color='red', icon='warning-sign')
+                ).add_to(intersection_group)
+        
+        intersection_group.add_to(m)
+    
+    # Add layer control
+    folium.LayerControl().add_to(m)
     
     return m
 
 
-def process_survey_image(image_bytes: bytes, api_key: str) -> Optional[Dict[str, Any]]:
+def process_survey_image(image_bytes: bytes, api_key: str, use_demo: bool = False) -> Optional[Dict[str, Any]]:
     """
     Process the uploaded survey image and extract data.
     
     Args:
         image_bytes: Raw image bytes
         api_key: OpenAI API key
+        use_demo: Whether to use demo mode
     
     Returns:
         Extracted survey data or None if processing fails
     """
     try:
-        with st.spinner("🔍 Analyzing document with AI..."):
-            results = extract_survey_data(image_bytes, api_key)
+        with st.spinner("🔍 Analyzing document with AI..." if not use_demo else "🧪 Processing demo data..."):
+            results = extract_survey_data(image_bytes, api_key, use_demo_data=use_demo)
             
             if 'error' in results:
-                st.error(f"❌ Error processing image: {results['error']}")
+                st.error(f"❌ Error processing: {results['error']}")
                 return None
             
             logger.info("Survey data extraction successful")
@@ -412,6 +583,48 @@ def convert_coordinates(
         return None
 
 
+def perform_risk_assessment(
+    converted_coords: List[Dict[str, float]], 
+    risk_radar: RiskRadar
+) -> Optional[Dict[str, Any]]:
+    """
+    Perform risk assessment on converted coordinates.
+    
+    Args:
+        converted_coords: List of converted coordinates with lat/lon
+        risk_radar: RiskRadar instance
+    
+    Returns:
+        Risk assessment result or None if assessment fails
+    """
+    try:
+        with st.spinner("🚨 Analyzing risk factors..."):
+            # Extract coordinate pairs for risk analysis
+            land_coordinates = [
+                (coord['latitude'], coord['longitude']) 
+                for coord in converted_coords
+            ]
+            
+            risk_result = risk_radar.check_intersection(land_coordinates)
+            logger.info(f"Risk assessment complete: {risk_result['status']}")
+            return risk_result
+            
+    except RiskCoordinateValidationError as e:
+        st.error(f"❌ Risk Assessment Validation Error: {str(e)}")
+        logger.error(f"Risk validation error: {str(e)}")
+        return None
+        
+    except RiskAnalysisError as e:
+        st.error(f"❌ Risk Assessment Error: {str(e)}")
+        logger.error(f"Risk analysis error: {str(e)}")
+        return None
+        
+    except Exception as e:
+        st.error(f"❌ Unexpected error during risk assessment: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        return None
+
+
 def main():
     """Main application entry point."""
     # Initialize session state
@@ -423,74 +636,55 @@ def main():
     # Main content area
     st.title("🗺️ Omo-Onile Radar")
     st.markdown(
-        "### Real Estate Due Diligence Tool for Nigerian Market\n"
-        "Upload a survey plan to extract data, convert coordinates, and visualize property boundaries."
+        "### Intelligent Real Estate Due Diligence Tool for Nigerian Market\n"
+        "Upload a survey plan to extract data, convert coordinates, visualize boundaries, and **detect government zone intersections**."
     )
     
     st.markdown("---")
     
-    # Check if API key is provided
-    if not st.session_state.api_key:
-        st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue.")
+    # Check if we can proceed (API key or demo mode)
+    if not st.session_state.api_key and not st.session_state.demo_mode:
+        st.warning("⚠️ Please enter your OpenAI API key in the sidebar or enable demo mode to continue.")
         st.info(
             "👉 Don't have an API key? Get one from [OpenAI Platform](https://platform.openai.com/api-keys)"
         )
         return
     
-    # File uploader
-    st.subheader("📤 Upload Survey Plan")
-    uploaded_file = st.file_uploader(
-        "Choose a survey plan image",
-        type=['png', 'jpg', 'jpeg'],
-        help="Upload a clear image of the survey plan document"
-    )
+    # File uploader or demo mode indicator
+    if st.session_state.demo_mode:
+        st.info("🧪 **Demo Mode Active** - Using test data to demonstrate risk detection capabilities")
+        st.markdown(
+            """
+            **Demo coordinates will:**
+            - Show land that overlaps with Lekki Government Acquisition Zone
+            - Trigger a DANGER risk alert
+            - Demonstrate the full risk assessment workflow
+            """
+        )
+    else:
+        st.subheader("📤 Upload Survey Plan")
+        uploaded_file = st.file_uploader(
+            "Choose a survey plan image",
+            type=['png', 'jpg', 'jpeg'],
+            help="Upload a clear image of the survey plan document"
+        )
     
-    # Check if a new file was uploaded
-    if uploaded_file is not None:
-        # Check if this is a new file
-        file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-        if st.session_state.uploaded_file != file_id:
-            st.session_state.uploaded_file = file_id
-            st.session_state.file_processed = False
-            st.session_state.extraction_results = None
-            st.session_state.converted_coordinates = None
-        
-        # Display uploaded image
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.image(uploaded_file, caption="Uploaded Survey Plan", use_container_width=True)
-        
-        with col2:
-            st.info(
-                f"**File Details:**\n\n"
-                f"- Name: {uploaded_file.name}\n"
-                f"- Size: {uploaded_file.size / 1024:.2f} KB\n"
-                f"- Type: {uploaded_file.type}"
-            )
-        
-        st.markdown("---")
-        
-        # Process button
-        if st.button("🚀 Process Survey Plan", type="primary", use_container_width=True):
-            st.session_state.file_processed = False
-            st.session_state.extraction_results = None
-            st.session_state.converted_coordinates = None
-        
-        # Process the file if not already processed
+    # Process based on mode
+    if st.session_state.demo_mode:
+        # Demo mode processing
         if not st.session_state.file_processed:
-            # Read image bytes
-            image_bytes = uploaded_file.read()
-            uploaded_file.seek(0)  # Reset file pointer
-            
-            # Extract survey data
-            extraction_results = process_survey_image(
-                image_bytes, 
-                st.session_state.api_key
-            )
-            
-            if extraction_results:
-                st.session_state.extraction_results = extraction_results
-                st.session_state.file_processed = True
+            if st.button("🚀 Analyze Demo Data", type="primary", use_container_width=True):
+                st.session_state.file_processed = False
+                st.session_state.extraction_results = None
+                st.session_state.converted_coordinates = None
+                st.session_state.risk_assessment = None
+                
+                # Process demo data
+                extraction_results = process_survey_image(b'', '', use_demo=True)
+                
+                if extraction_results:
+                    st.session_state.extraction_results = extraction_results
+                    st.session_state.file_processed = True
         
         # Display results if available
         if st.session_state.extraction_results:
@@ -502,10 +696,7 @@ def main():
             coordinates = st.session_state.extraction_results.get('coordinates', [])
             
             if not coordinates:
-                st.warning(
-                    "⚠️ No coordinates were found in the survey plan. "
-                    "Please ensure the image is clear and contains coordinate information."
-                )
+                st.warning("⚠️ No coordinates were found in the demo data.")
             else:
                 # Convert coordinates if not already converted
                 if st.session_state.converted_coordinates is None:
@@ -519,14 +710,32 @@ def main():
                     if converted:
                         st.session_state.converted_coordinates = converted
                 
+                # Perform risk assessment
+                if st.session_state.converted_coordinates and not st.session_state.risk_assessment:
+                    risk_radar = get_risk_radar()
+                    risk_result = perform_risk_assessment(
+                        st.session_state.converted_coordinates,
+                        risk_radar
+                    )
+                    
+                    if risk_result:
+                        st.session_state.risk_assessment = risk_result
+                
+                # Display risk assessment
+                if st.session_state.risk_assessment:
+                    st.subheader("🚨 Risk Assessment")
+                    render_risk_alert(st.session_state.risk_assessment)
+                    st.markdown("---")
+                
                 # Display map if coordinates are converted
                 if st.session_state.converted_coordinates:
-                    st.subheader("🗺️ Property Boundary Visualization")
+                    st.subheader("🗺️ Property & Risk Visualization")
                     
                     # Create and display map
-                    property_map = create_map_visualization(
+                    property_map = create_enhanced_map_visualization(
                         st.session_state.converted_coordinates,
-                        st.session_state.extraction_results
+                        st.session_state.extraction_results,
+                        st.session_state.risk_assessment
                     )
                     
                     st_folium(
@@ -560,13 +769,154 @@ def main():
                     st.download_button(
                         label="📥 Download Coordinates as CSV",
                         data=csv,
-                        file_name=f"coordinates_{st.session_state.extraction_results.get('survey_number', 'survey')}.csv",
+                        file_name=f"coordinates_{st.session_state.extraction_results.get('survey_number', 'demo')}.csv",
                         mime="text/csv"
                     )
-    
     else:
-        # No file uploaded yet
-        st.info("👆 Upload a survey plan image to get started")
+        # Regular file upload mode
+        uploaded_file = st.session_state.uploaded_file
+        
+        if uploaded_file:
+            # Check if this is a new file
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            if st.session_state.uploaded_file != file_id:
+                st.session_state.uploaded_file = file_id
+                st.session_state.file_processed = False
+                st.session_state.extraction_results = None
+                st.session_state.converted_coordinates = None
+                st.session_state.risk_assessment = None
+            
+            # Display uploaded image
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image(uploaded_file, caption="Uploaded Survey Plan", use_container_width=True)
+            
+            with col2:
+                st.info(
+                    f"**File Details:**\n\n"
+                    f"- Name: {uploaded_file.name}\n"
+                    f"- Size: {uploaded_file.size / 1024:.2f} KB\n"
+                    f"- Type: {uploaded_file.type}"
+                )
+            
+            st.markdown("---")
+            
+            # Process button
+            if st.button("🚀 Process Survey Plan", type="primary", use_container_width=True):
+                st.session_state.file_processed = False
+                st.session_state.extraction_results = None
+                st.session_state.converted_coordinates = None
+                st.session_state.risk_assessment = None
+            
+            # Process the file if not already processed
+            if not st.session_state.file_processed:
+                # Read image bytes
+                image_bytes = uploaded_file.read()
+                uploaded_file.seek(0)  # Reset file pointer
+                
+                # Extract survey data
+                extraction_results = process_survey_image(
+                    image_bytes, 
+                    st.session_state.api_key,
+                    use_demo=False
+                )
+                
+                if extraction_results:
+                    st.session_state.extraction_results = extraction_results
+                    st.session_state.file_processed = True
+            
+            # Display results if available
+            if st.session_state.extraction_results:
+                display_extraction_results(st.session_state.extraction_results)
+                
+                st.markdown("---")
+                
+                # Process coordinates
+                coordinates = st.session_state.extraction_results.get('coordinates', [])
+                
+                if not coordinates:
+                    st.warning(
+                        "⚠️ No coordinates were found in the survey plan. "
+                        "Please ensure the image is clear and contains coordinate information."
+                    )
+                else:
+                    # Convert coordinates if not already converted
+                    if st.session_state.converted_coordinates is None:
+                        coord_manager = get_coordinate_manager()
+                        converted = convert_coordinates(
+                            coordinates,
+                            st.session_state.region,
+                            coord_manager
+                        )
+                        
+                        if converted:
+                            st.session_state.converted_coordinates = converted
+                    
+                    # Perform risk assessment
+                    if st.session_state.converted_coordinates and not st.session_state.risk_assessment:
+                        risk_radar = get_risk_radar()
+                        risk_result = perform_risk_assessment(
+                            st.session_state.converted_coordinates,
+                            risk_radar
+                        )
+                        
+                        if risk_result:
+                            st.session_state.risk_assessment = risk_result
+                    
+                    # Display risk assessment
+                    if st.session_state.risk_assessment:
+                        st.subheader("🚨 Risk Assessment")
+                        render_risk_alert(st.session_state.risk_assessment)
+                        st.markdown("---")
+                    
+                    # Display map if coordinates are converted
+                    if st.session_state.converted_coordinates:
+                        st.subheader("🗺️ Property & Risk Visualization")
+                        
+                        # Create and display map
+                        property_map = create_enhanced_map_visualization(
+                            st.session_state.converted_coordinates,
+                            st.session_state.extraction_results,
+                            st.session_state.risk_assessment
+                        )
+                        
+                        st_folium(
+                            property_map, 
+                            width=None, 
+                            height=600,
+                            returned_objects=[]
+                        )
+                        
+                        # Display coordinate table
+                        st.subheader("📊 Coordinate Details")
+                        
+                        import pandas as pd
+                        
+                        # Create DataFrame for display
+                        coord_data = []
+                        for idx, coord in enumerate(st.session_state.converted_coordinates, 1):
+                            coord_data.append({
+                                'Point': idx,
+                                'Easting (m)': f"{coord['easting']:.2f}",
+                                'Northing (m)': f"{coord['northing']:.2f}",
+                                'Latitude (°)': f"{coord['latitude']:.6f}",
+                                'Longitude (°)': f"{coord['longitude']:.6f}"
+                            })
+                        
+                        df = pd.DataFrame(coord_data)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        
+                        # Download option
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Coordinates as CSV",
+                            data=csv,
+                            file_name=f"coordinates_{st.session_state.extraction_results.get('survey_number', 'survey')}.csv",
+                            mime="text/csv"
+                        )
+        else:
+            # No file uploaded yet
+            st.info("👆 Upload a survey plan image to get started")
     
     # Footer with disclaimer
     st.markdown("---")
@@ -588,7 +938,8 @@ def main():
                 with qualified surveyors and legal professionals before making any land 
                 purchase or development decisions. The coordinate conversions and data 
                 extractions are based on automated processing and should be independently 
-                verified.
+                verified. Risk assessment powered by geometric analysis. 
+                Verify with official sources before decisions.
             </p>
         </div>
         """,
@@ -600,6 +951,7 @@ def main():
         """
         <div style="text-align: center; color: #666; padding: 2rem 0 1rem 0;">
             <p>Built with ❤️ for the Nigerian Real Estate Market</p>
+            <p><em>Now with Intelligent Risk Detection</em></p>
         </div>
         """,
         unsafe_allow_html=True
