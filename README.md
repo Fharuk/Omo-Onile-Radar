@@ -4,7 +4,7 @@ A production-ready Streamlit application for real estate due diligence in the Ni
 
 ## Features
 
-- 🔍 **AI-Powered OCR**: Extracts survey data using OpenAI's GPT-4 Vision model
+- 🔍 **AI-Powered OCR**: Extracts survey data using OpenAI (GPT-4o) or Google Gemini (Gemini 2.5 Pro)
 - 📐 **Coordinate Transformation**: Converts Minna Datum (EPSG:26331/26332) to WGS84 (EPSG:4326)
 - 🗺️ **Interactive Maps**: Visualizes property boundaries using Folium with satellite imagery
 - 🛰️ **Satellite View**: Toggle between Street and Satellite (Esri World Imagery) map layers
@@ -28,7 +28,9 @@ The application supports both Nigerian survey zones:
 ### Prerequisites
 
 - Python 3.9 or higher
-- OpenAI API key ([Get one here](https://platform.openai.com/api-keys))
+- An API key for either:
+  - OpenAI ([Get one here](https://platform.openai.com/api-keys))
+  - Google Gemini (via Google AI Studio)
 
 ### Setup
 
@@ -57,7 +59,7 @@ The application supports both Nigerian survey zones:
 4. **Configure environment (Optional)**
    ```bash
    cp .env.example .env
-   # Edit .env and add your OpenAI API key
+   # Edit .env and add your API key (OpenAI or Gemini)
    ```
 
 5. **Configure email notifications (Optional)**
@@ -102,21 +104,22 @@ The application supports both Nigerian survey zones:
 
 ### Using the Tool
 
-1. **Enter your OpenAI API key** in the sidebar (or enable Demo Mode)
-2. **Select your region** (Lagos West or Lagos East)
-3. **Select coordinate units** (Meters or Feet)
-4. **Upload a survey plan** image (PNG, JPG, or JPEG)
-5. **Click "Process Survey Plan"** to extract data
-6. **Review and edit coordinates** in the editable table if needed
-7. **View results**:
+1. **Select your AI provider** (OpenAI GPT-4o or Google Gemini 2.5 Pro)
+2. **Enter your API key** in the sidebar (or enable Demo Mode)
+3. **Select your region** (Lagos West or Lagos East)
+4. **Select coordinate units** (Meters or Feet)
+5. **Upload a survey plan** image (PNG, JPG, or JPEG)
+6. **Click "Process Survey Plan"** to extract data
+7. **Review and edit coordinates** in the editable table if needed
+8. **View results**:
    - Survey metadata (number, surveyor, location)
    - Risk assessment (government zone intersections)
    - Red flags (if any)
    - Interactive map with property boundaries and satellite view
    - Toggle between Street and Satellite map layers
    - Coordinate table with both Minna and WGS84 values
-8. **Download coordinates** as CSV for further analysis
-9. **Request professional verification** via the lead form (admin receives email notification)
+9. **Download coordinates** as CSV for further analysis
+10. **Request professional verification** via the lead form (admin receives email notification)
 
 ## Project Structure
 
@@ -173,7 +176,7 @@ converted = manager.batch_convert(coordinates, zone=26331, units='meters')
 
 ### utils/ocr.py - Survey Data Extraction
 
-The `extract_survey_data` function uses OpenAI Vision API:
+The `extract_survey_data` function supports multiple providers:
 
 ```python
 from utils.ocr import extract_survey_data
@@ -181,11 +184,15 @@ from utils.ocr import extract_survey_data
 with open('survey_plan.jpg', 'rb') as f:
     image_bytes = f.read()
 
-result = extract_survey_data(image_bytes, api_key='your-api-key')
+# OpenAI
+result = extract_survey_data(image_bytes, api_key="your-openai-key", provider="openai")
 
-print(result['survey_number'])
-print(result['coordinates'])
-print(result['red_flags'])
+# Gemini
+result = extract_survey_data(image_bytes, api_key="your-gemini-key", provider="gemini")
+
+print(result["survey_number"])
+print(result["coordinates"])
+print(result["red_flags"])
 ```
 
 ## Technical Details
@@ -199,7 +206,9 @@ print(result['red_flags'])
 
 ### AI Model
 
-- **Model**: OpenAI GPT-4o with Vision
+- **Models**:
+  - OpenAI: GPT-4o (Vision)
+  - Google Gemini: Gemini 2.5 Pro (default for Gemini provider)
 - **Purpose**: Extract structured data from survey plan images
 - **Extracted Data**:
   - Survey number
@@ -255,6 +264,7 @@ Core dependencies (see `requirements.txt` for versions):
 - `folium` - Interactive mapping library
 - `pyproj` - Coordinate transformation library
 - `openai` - OpenAI API client
+- `google-generativeai` - Google Gemini API client
 - `python-dotenv` - Environment variable management
 - `Pillow` - Image processing library
 
@@ -263,8 +273,9 @@ Core dependencies (see `requirements.txt` for versions):
 ### Common Issues
 
 1. **"Invalid API Key" Error**
-   - Verify your OpenAI API key is correct
-   - Check that your API key has access to GPT-4 Vision
+   - Verify your API key is correct for the selected provider
+   - For OpenAI: ensure your key has access to GPT-4o (Vision)
+   - For Gemini: ensure your key is enabled for the Gemini API
 
 2. **"Coordinate Outside Valid Range" Error**
    - Ensure you've selected the correct zone (West vs East)

@@ -9,6 +9,7 @@
 - folium==0.15.1
 - pyproj==3.6.1
 - openai==1.6.1
+- google-generativeai==0.3.2
 - python-dotenv==1.0.0
 - Pillow==10.1.0
 
@@ -27,7 +28,7 @@
 ### 3. utils/ocr.py - Survey Data Extraction Module ✓
 **Function: extract_survey_data(image_bytes, api_key):**
 - ✓ Converts image bytes to base64 encoding
-- ✓ Calls OpenAI gpt-4o with vision capability
+- ✓ Calls either OpenAI gpt-4o (vision) or Google Gemini (Gemini 2.5 Pro) depending on selected provider
 - ✓ System prompt instructs extraction of: survey_number, surveyor_name, location_text, coordinates, red_flags
 - ✓ Parses JSON response and validates structure
 - ✓ Retry logic for transient failures (rate limits, timeouts)
@@ -88,7 +89,7 @@
 ├── utils/
 │   ├── __init__.py          ✓
 │   ├── geo.py              ✓
-│   └── ocr.py              ✓
+│   └── ocr.py              ✓ (OpenAI + Gemini)
 ├── app.py                   ✓
 ├── requirements.txt         ✓
 ├── .env.example            ✓
@@ -108,7 +109,7 @@
 ### 7. Technical Requirements ✓
 - ✓ Nigerian Minna Datum: EPSG:26331 (Zone 31N) and EPSG:26332 (Zone 32N)
 - ✓ Target: EPSG:4326 (WGS84)
-- ✓ OpenAI model: gpt-4o with vision capability
+- ✓ AI models: OpenAI gpt-4o (vision) or Google Gemini (Gemini 2.5 Pro)
 - ✓ Handles 3-8 corner coordinates
 - ✓ Detects red flags for land disputes
 - ✓ Retry logic with exponential backoff
