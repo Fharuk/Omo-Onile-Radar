@@ -194,9 +194,7 @@ def render_sidebar():
         api_key_input = ""
         provider_key_label = "OpenAI API Key"
 
-    api_key_disabled = st.session_state.demo_mode
-
-    if not api_key_disabled and api_key_input != st.session_state.api_key:
+    if (not st.session_state.demo_mode) and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
         st.session_state.file_processed = False
 
