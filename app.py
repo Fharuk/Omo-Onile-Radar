@@ -151,21 +151,46 @@ def render_sidebar():
     
     st.sidebar.markdown("---")
     
-    # API Key Input (disabled in demo mode)
-    st.sidebar.subheader("OpenAI API Key")
-    api_key_disabled = st.session_state.demo_mode
-    api_key_help = (
-        "Demo mode active - API key not required" if api_key_disabled
-        else "Your API key is required to process survey plans with AI"
-    )
+    # AI Provider Selection (only shown when not in demo mode)
+    if not st.session_state.demo_mode:
+        st.sidebar.subheader("🤖 AI Provider")
+        ai_provider_options = ["OpenAI GPT-4o", "Google Gemini 1.5 Flash"]
+        ai_provider_index = 0 if st.session_state.get('ai_provider', 'openai') == 'openai' else 1
+        
+        selected_provider = st.sidebar.selectbox(
+            "Select AI Provider",
+            options=ai_provider_options,
+            index=ai_provider_index,
+            help="Choose between OpenAI GPT-4o or Google Gemini for document analysis"
+        )
+        
+        # Update session state based on selection
+        if selected_provider == "OpenAI GPT-4o":
+            st.session_state.ai_provider = 'openai'
+            provider_key_label = "OpenAI API Key"
+        else:
+            st.session_state.ai_provider = 'gemini'
+            provider_key_label = "Google Gemini API Key"
+    else:
+        st.session_state.ai_provider = 'openai'  # Default for demo mode
     
-    api_key_input = st.sidebar.text_input(
-        "Enter your OpenAI API key",
-        type="password",
-        value=st.session_state.api_key,
-        disabled=api_key_disabled,
-        help=api_key_help
-    )
+    # Dynamic API Key Input based on selected provider
+    if not st.session_state.demo_mode:
+        st.sidebar.subheader(f"{provider_key_label if st.session_state.ai_provider == 'openai' else 'Google Gemini API Key'}")
+        api_key_help = (
+            f"Your {provider_key_label} is required to process survey plans with AI"
+        )
+        
+        api_key_input = st.sidebar.text_input(
+            f"Enter your {provider_key_label}",
+            type="password",
+            value=st.session_state.api_key,
+            help=api_key_help
+        )
+    else:
+        # Not visible in demo mode, but set default values
+        api_key_input = ""
+        provider_key_label = "OpenAI API Key"
     
     if not api_key_disabled and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
@@ -635,13 +660,14 @@ def create_enhanced_map_visualization(
     return m
 
 
-def process_survey_image(image_bytes: bytes, api_key: str, use_demo: bool = False) -> Optional[Dict[str, Any]]:
+def process_survey_image(image_bytes: bytes, api_key: str, provider: str = 'openai', use_demo: bool = False) -> Optional[Dict[str, Any]]:
     """
     Process the uploaded survey image and extract data.
     
     Args:
         image_bytes: Raw image bytes
-        api_key: OpenAI API key
+        api_key: API key for the selected provider
+        provider: AI provider to use ('openai' or 'gemini')
         use_demo: Whether to use demo mode
     
     Returns:
@@ -649,7 +675,7 @@ def process_survey_image(image_bytes: bytes, api_key: str, use_demo: bool = Fals
     """
     try:
         with st.spinner("🔍 Analyzing document with AI..." if not use_demo else "🧪 Processing demo data..."):
-            results = extract_survey_data(image_bytes, api_key, use_demo_data=use_demo)
+            results = extract_survey_data(image_bytes, api_key, provider=provider, use_demo_data=use_demo)
             
             if 'error' in results:
                 st.error(f"❌ Error processing: {results['error']}")
@@ -1174,9 +1200,11 @@ def main():
                 uploaded_file.seek(0)  # Reset file pointer
                 
                 # Extract survey data
+                provider = st.session_state.get('ai_provider', 'openai')
                 extraction_results = process_survey_image(
                     image_bytes, 
                     st.session_state.api_key,
+                    provider=provider,
                     use_demo=False
                 )
                 
