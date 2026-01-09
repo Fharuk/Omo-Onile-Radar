@@ -12,6 +12,12 @@ import time
 from typing import Dict, Any, Optional, List
 from io import BytesIO
 from openai import OpenAI, OpenAIError, APIError, RateLimitError, APITimeoutError
+try:
+    import google.generativeai as genai
+    GOOGLE_AI_AVAILABLE = True
+except ImportError:
+    GOOGLE_AI_AVAILABLE = False
+    genai = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -111,6 +117,7 @@ def validate_extraction_result(data: Dict[str, Any]) -> bool:
 def extract_survey_data(
     image_bytes: bytes, 
     api_key: str,
+    provider: str = 'openai',
     max_retries: int = 3,
     retry_delay: int = 2,
     use_demo_data: bool = False
@@ -130,7 +137,8 @@ def extract_survey_data(
     
     Args:
         image_bytes: Raw bytes of the survey plan image
-        api_key: OpenAI API key
+        api_key: API key for the selected provider
+        provider: AI provider to use ('openai' or 'gemini'). Defaults to 'openai'
         max_retries: Maximum number of retry attempts for transient failures
         retry_delay: Delay in seconds between retries (doubles after each attempt)
         use_demo_data: If True, bypass API and return hardcoded demo data
@@ -173,7 +181,8 @@ def extract_survey_data(
     
     # Demo mode validation - require API key and image for non-demo mode
     if not api_key:
-        error_msg = "OpenAI API key is required"
+        provider_name = "OpenAI" if provider == "openai" else "Google Gemini"
+        error_msg = f"{provider_name} API key is required"
         logger.error(error_msg)
         return {'error': error_msg}
     
@@ -182,6 +191,24 @@ def extract_survey_data(
         logger.error(error_msg)
         return {'error': error_msg}
     
+    # Route to appropriate AI provider
+    if provider == 'gemini':
+        if not GOOGLE_AI_AVAILABLE:
+            error_msg = "Google Gemini package is not installed. Please install with: pip install google-generativeai"
+            logger.error(error_msg)
+            return {'error': error_msg}
+        
+        try:
+            logger.info("Using Google Gemini for OCR extraction")
+            return extract_with_gemini(image_bytes, api_key)
+        except OCRError:
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error with Gemini: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {'error': error_msg}
+    
+    # Default to OpenAI
     try:
         # Encode image to base64
         base64_image = encode_image_to_base64(image_bytes)
@@ -351,6 +378,119 @@ Example output format:
         
     except Exception as e:
         error_msg = f"Unexpected error during survey data extraction: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise OCRError(error_msg)
+
+
+def extract_with_gemini(image_bytes: bytes, api_key: str) -> Dict[str, Any]:
+    """
+    Extract survey data using Google Gemini Vision API.
+    
+    Args:
+        image_bytes: Raw bytes of the survey plan image
+        api_key: Google API key for Gemini
+    
+    Returns:
+        Dictionary containing extracted survey data
+    
+    Raises:
+        OCRError: If extraction fails
+    """
+    try:
+        # Configure Gemini API
+        genai.configure(api_key=api_key)
+        
+        # Use the appropriate Gemini model (default to 1.5 Flash for speed and cost)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Convert image bytes to a format suitable for Gemini
+        from PIL import Image
+        image = Image.open(BytesIO(image_bytes))
+        
+        # System prompt for survey data extraction (same as OpenAI)
+        system_prompt = """You are an expert Surveyor with extensive experience in Nigerian land surveying and documentation. 
+
+Your task is to analyze survey plan images and extract structured information. Extract the following information into valid JSON format:
+
+1. 'survey_number': The survey plan number or reference (e.g., \"LS/1234/2023\", \"Plan No. 456\")
+2. 'surveyor_name': The name of the surveyor or surveying firm who prepared the plan
+3. 'location_text': The location description of the property (e.g., \"Plot 5, Block A, Lekki Phase 1, Lagos\")
+4. 'coordinates': A list of coordinate pairs. Each coordinate should be a dictionary with:
+   - 'easting': The easting coordinate value (X coordinate in meters)
+   - 'northing': The northing coordinate value (Y coordinate in meters)
+5. 'red_flags': Scan the document for concerning terms or phrases that might indicate issues with the property title or survey. Look for words or phrases such as:
+   - \"Excision in Process\"
+   - \"Ratification\"
+   - \"Committed\"
+   - \"Pending\"
+   - \"Provisional\"
+   - \"Subject to\"
+   - \"Disputed\"
+   - Any other terms suggesting incomplete or problematic status
+
+IMPORTANT INSTRUCTIONS:
+- If any field cannot be found, use an empty string \"\" for text fields or empty list [] for list fields
+- Coordinates should be extracted carefully - they are typically found in coordinate tables or at plot corners
+- Extract ALL coordinate pairs you can find (typically 3-8 for land plots)
+- Numbers in coordinates often have 6-7 digits
+- Return ONLY valid JSON, no additional text or explanations
+- Do not include any markdown formatting
+
+Example output format:
+{
+  \"survey_number\": \"LS/1234/2023\",
+  \"surveyor_name\": \"John Doe & Associates\",
+  \"location_text\": \"Plot 5, Block A, Lekki Phase 1, Lagos\",
+  \"coordinates\": [
+    {\"easting\": 543210.50, \"northing\": 712345.20},
+    {\"easting\": 543250.30, \"northing\": 712345.20},
+    {\"easting\": 543250.30, \"northing\": 712385.40},
+    {\"easting\": 543210.50, \"northing\": 712385.40}
+  ],
+  \"red_flags\": [\"Excision in Process\"]
+}"""
+        
+        # Prepare the prompt for Gemini
+        prompt = f"{system_prompt}\n\nPlease analyze this survey plan image and extract the requested information in JSON format."
+        
+        # Generate content with image
+        response = model.generate_content([prompt, image])
+        
+        # Extract the text response
+        content = response.text
+        logger.info("Received response from Google Gemini API")
+        logger.debug(f"Response content: {content}")
+        
+        # Parse JSON response - CRITICAL: Strip markdown code blocks if present
+        content = content.strip()
+        if content.startswith("```json"):
+            content = content[7:].strip()
+        elif content.startswith("```"):
+            content = content[3:].strip()
+        
+        if content.endswith("```"):
+            content = content[:-3].strip()
+        
+        # Parse JSON
+        try:
+            extracted_data = json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response from Gemini: {str(e)}")
+            logger.error(f"Response content: {content}")
+            raise OCRError(f"Failed to parse Gemini API response as JSON: {str(e)}")
+        
+        # Validate the extracted data structure
+        validate_extraction_result(extracted_data)
+        
+        logger.info(
+            f"Successfully extracted survey data using Gemini: "
+            f"{len(extracted_data.get('coordinates', []))} coordinates found"
+        )
+        
+        return extracted_data
+        
+    except Exception as e:
+        error_msg = f"Error during Gemini extraction: {str(e)}"
         logger.error(error_msg, exc_info=True)
         raise OCRError(error_msg)
 

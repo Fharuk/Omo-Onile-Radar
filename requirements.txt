@@ -3,6 +3,7 @@ streamlit-folium==0.15.1
 folium==0.15.1
 pyproj==3.6.1
 openai==1.6.1
+google-generativeai==0.3.2
 python-dotenv==1.0.0
 Pillow==10.1.0
 shapely>=2.0.1
